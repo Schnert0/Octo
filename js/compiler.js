@@ -222,6 +222,7 @@ function Compiler(source) {
 	this.breakpoints = {}; // map<address, name>
 	this.monitors = {}; // map<name, {base, length}>
 	this.hereaddr = 0x200;
+	this.orgoffset = 0;
 
 	this.pos = null;
 	this.currentToken = 0
@@ -238,12 +239,13 @@ Compiler.prototype.data = function(a) {
 	this.hereaddr++;
 }
 
-Compiler.prototype.end = function()     { return this.currentToken >= this.tokens.length }
-Compiler.prototype.next = function()    { this.pos = this.tokens[this.currentToken++]; return this.pos[0]; }
-Compiler.prototype.raw  = function()    { this.pos = this.tokens[this.currentToken++]; return this.pos; }
-Compiler.prototype.peek = function()    { return this.tokens[this.currentToken][0]; }
-Compiler.prototype.here = function()    { return this.hereaddr; }
-Compiler.prototype.inst = function(a,b) { this.data(a); this.data(b); }
+Compiler.prototype.end       = function()    { return this.currentToken >= this.tokens.length }
+Compiler.prototype.next      = function()    { this.pos = this.tokens[this.currentToken++]; return this.pos[0]; }
+Compiler.prototype.raw       = function()    { this.pos = this.tokens[this.currentToken++]; return this.pos; }
+Compiler.prototype.peek      = function()    { return this.tokens[this.currentToken][0]; }
+Compiler.prototype.here      = function()    { return this.hereaddr; }
+Compiler.prototype.orgOffset = function()    { return this.orgoffset; }
+Compiler.prototype.inst      = function(a,b) { this.data(a); this.data(b); }
 
 Compiler.prototype.immediate = function(op, nnn) {
 	this.inst(op | ((nnn >> 8) & 0xF), (nnn & 0xFF));
@@ -308,7 +310,7 @@ Compiler.prototype.reservedNames = {
 	"<=":true, ">=":true, "key":true, "-key":true, "hex":true, "bighex":true,
 	"random":true, "delay":true, ":":true, ":next":true, ":unpack":true,
 	":breakpoint":true, ":proto":true, ":alias":true, ":const":true,
-	":org":true, ";":true, "return":true, "clear":true, "bcd":true,
+	":org":true, ":offset":true, ";":true, "return":true, "clear":true, "bcd":true,
 	"save":true, "load":true, "buzzer":true, "if":true, "then":true,
 	"begin":true, "else":true, "end":true, "jump":true, "jump0":true,
 	"native":true, "sprite":true, "loop":true, "while":true, "again":true,
@@ -339,13 +341,13 @@ Compiler.prototype.veryWideValue = function(noForward) {
 			throw "The reference to '"+nnnn+"' may not be forward-declared.";
 		}
 		else if (nnnn in this.protos) {
-			this.protos[nnnn].push(this.here()+2);
-			this.longproto[this.here()+2] = true;
+			this.protos[nnnn].push(this.here()+this.orgOffset()+2);
+			this.longproto[this.here()+this.orgOffset()+2] = true;
 			nnnn = 0;
 		}
 		else {
 			this.protos[this.checkName(nnnn, "label")] = [this.here()+2];
-			this.longproto[this.here()+2] = true;
+			this.longproto[this.here()+this.here+2] = true;
 			nnnn = 0;
 		}
 	}
@@ -361,14 +363,14 @@ Compiler.prototype.wideValue = function(nnn) {
 	if (!nnn & (nnn != 0)) { nnn = this.next(); }
 	if (typeof nnn != "number") {
 		if (nnn in this.constants) {
-			nnn = this.constants[nnn];
+			nnn = this.constants[nnn]+this.orgOffset();
 		}
 		else if (nnn in this.protos) {
-			this.protos[nnn].push(this.here());
+			this.protos[nnn].push(this.here() + this.orgOffset());
 			nnn = 0;
 		}
 		else if (nnn in this.dict) {
-			nnn = this.dict[nnn];
+			nnn = this.dict[nnn]+this.orgOffset();
 		}
 		else {
 			this.protos[this.checkName(nnn, "label")] = [this.here()];
@@ -528,7 +530,7 @@ Compiler.prototype.vassign = function(reg, token) {
 }
 
 Compiler.prototype.resolveLabel = function(offset) {
-	var target = (this.here() + offset);
+	var target = (this.here() + this.orgOffset() + offset);
 	var label = this.checkName(this.next(), "label");
 	if ((target == 0x202) && (label == "main")) {
 		this.hasmain = false;
@@ -550,13 +552,13 @@ Compiler.prototype.resolveLabel = function(offset) {
 			else if ((this.rom[addr - 0x200] & 0xF0) == 0x60) {
 				// :unpack target
 				if ((target & 0xFFF) != target)
-					throw "Value '" + target + "' for label '" + label + "' cannot fit in 12 bits!";
+					throw "Value '" + target + "' for label '" + label + "' cannot not fit in 12 bits!";
 				this.rom[addr - 0x1FF] = (this.rom[addr - 0x1FF] & 0xF0) | ((target >> 8)&0xF);
 				this.rom[addr - 0x1FD] = (target & 0xFF);
 			}
 			else {
 				if ((target & 0xFFF) != target)
-					throw "Value '" + target + "' for label '" + label + "' cannot fit in 12 bits!";
+					throw "Value '" + target + "' for label '" + label + "' cannot not fit in 12 bits!";
 				this.rom[addr - 0x200] = (this.rom[addr - 0x200] & 0xF0) | ((target >> 8)&0xF);
 				this.rom[addr - 0x1FF] = (target & 0xFF);
 			}
@@ -714,8 +716,13 @@ Compiler.prototype.instruction = function(token) {
 		this.data(this.peek() == '{' ? this.parseCalculated('ANONYMOUS') : this.shortValue());
 	}
 	else if (token == ":org") {
+		this.orgoffset = 0;
 		var addr = this.peek() == '{' ? this.parseCalculated('ANONYMOUS') : this.constantValue();
 		this.hereaddr = 0xFFFF & addr;
+	}
+	else if (token == ":offset"){
+		var offset = this.peek() == '{' ? this.parseCalculated('ANONYMOUS') : this.constantValue();
+		this.orgoffset = offset - this.hereaddr;
 	}
 	else if (token == ":assert") {
 		var message = this.peek() == '{' ? null : this.next();
@@ -759,7 +766,7 @@ Compiler.prototype.instruction = function(token) {
 		else if (control[0] == "begin") {
 			this.conditional(true);
 			this.expect("begin");
-			this.branches.push([this.here(), this.pos, "begin"]);
+			this.branches.push([this.here()+this.orgOffset(), this.pos, "begin"]);
 			this.inst(0x00, 0x00);
 		}
 		else {
@@ -772,7 +779,7 @@ Compiler.prototype.instruction = function(token) {
 			throw "This 'else' does not have a matching 'begin'.";
 		}
 		this.jump(this.branches.pop()[0], this.here()+2);
-		this.branches.push([this.here(), this.pos, "else"]);
+		this.branches.push([this.here()+this.orgOffset(), this.pos, "else"]);
 		this.inst(0x00, 0x00);
 	}
 	else if (token == "end") {
@@ -792,7 +799,7 @@ Compiler.prototype.instruction = function(token) {
 		this.inst(0xD0 | r1, (r2 << 4) | size);
 	}
 	else if (token == "loop") {
-		this.loops.push([this.here(), this.pos]);
+		this.loops.push([this.here()+this.orgOffset(), this.pos]);
 		this.whiles.push(null);
 	}
 	else if (token == "while") {
@@ -800,16 +807,17 @@ Compiler.prototype.instruction = function(token) {
 			throw "This 'while' is not within a loop.";
 		}
 		this.conditional(true);
-		this.whiles.push(this.here());
+		this.whiles.push(this.here()+this.orgOffset());
 		this.immediate(0x10, 0);
 	}
 	else if (token == "again") {
 		if (this.loops.length < 1) {
 			throw "This 'again' does not have a matching 'loop'.";
 		}
-		this.immediate(0x10, this.loops.pop()[0]);
+		var addr = this.loops.pop()[0];
+		this.immediate(0x10, addr);
 		while (this.whiles[this.whiles.length - 1] != null) {
-			this.jump(this.whiles.pop(), this.here());
+			this.jump(this.whiles.pop(), this.here()+this.orgOffset());
 		}
 		this.whiles.pop();
 	}
@@ -875,6 +883,7 @@ Compiler.prototype.go = function() {
 			this.instruction(this.next());
 		}
 	}
+
 	if (this.hasmain == true) {
 		// resolve the main branch
 		this.jump(0x200, this.wideValue("main"));
